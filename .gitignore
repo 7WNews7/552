@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.hoplite/attachments/
+dist/preview/_frames/
