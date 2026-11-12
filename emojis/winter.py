@@ -5,6 +5,8 @@ from kit.registry import emoji
 from kit.lottie import part, group, anim, stroke
 from kit.geometry import line, circle_path, rounded
 from kit import fx, style as S
+from kit.lottie import loop, phase, fill, trim, ellipse
+from kit.geometry import P, Bez, polyline, star, sparkle_path, morph
 
 
 def _flake_arms(cx, cy, r_in, r_out, branches):
@@ -54,3 +56,333 @@ def e_snowflake(T):
     body = group(group(flake, pivot=(cx, cy), r=fx.spin(T, 1 / 6)), gem, sparks,
                  pivot=(cx, cy), s=fx.breathe(T, 95, 104, cycles=2))
     return [fx.glow(cx, cy, 236, alpha=0.4, s=fx.breathe(T, 88, 102, cycles=2)), body]
+
+
+# ============================================================= shared helpers (062-080)
+COAL = '#1d2747'
+G_KNIT = [(0.0, '#4a74d6'), (1.0, '#1b357f')]          # navy knitted wool (avatar scarf)
+G_FIR = [(0.0, '#7fe3d4'), (0.5, '#249c9f'), (1.0, '#105a7a')]
+G_FIR_NIGHT = [(0.0, '#4aa6bf'), (0.5, '#1f6b8f'), (1.0, '#123d6e')]
+G_CARROT = [(0.0, '#ffb35a'), (1.0, '#e8742a')]
+
+
+def _pol(cx, cy, r, deg):
+    a = math.radians(deg)
+    return cx + r * math.cos(a), cy + r * math.sin(a)
+
+
+def _cubic(p0, p1, p2, p3, t):
+    u = 1 - t
+    return tuple(u * u * u * a + 3 * u * u * t * b + 3 * u * t * t * c + t * t * t * d
+                 for a, b, c, d in zip(p0, p1, p2, p3))
+
+
+def _cubic_head(p0, p1, p2, p3, t):
+    """Control points of the 0..t piece of a cubic (de Casteljau)."""
+    L = lambda a, b: (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+    a, b, c = L(p0, p1), L(p1, p2), L(p2, p3)
+    d, e = L(a, b), L(b, c)
+    return p0, a, d, L(d, e)
+
+
+def _snow_fill(x, y, r):
+    """Round snow body lit from the top-left (radial, no extra shading shapes needed)."""
+    return S.rgrad([(0, '#ffffff'), (0.45, '#f1f8ff'), (0.75, '#d3e8fb'), (1, '#9fc8f0')],
+                   x - r * 0.32, y - r * 0.38, r * 1.5)
+
+
+def _mini_flake(x, y, r, w=7, color=S.ICE_L, ow=4):
+    arms = [line(*_pol(x, y, r, a), *_pol(x, y, r, a + 180)) for a in (90, 30, -30)]
+    return [part(*arms, stroke=stroke(S.OUTLINE, w + 2 * ow), name='flake_ow'),
+            part(*arms, stroke=stroke(color, w), name='flake')]
+
+
+def _flakes(T, specs, fade=0.2):
+    """Falling outlined mini flakes. specs: [(x, y0, y1, r, phase 0..1, sway px)]."""
+    out = []
+    for x, y0, y1, r, ph, sway in specs:
+        dt = ph * T
+        fall = phase(anim((0, [0, 0], 'linear'), (T, [0, y1 - y0])), dt, T)
+        op = phase(anim((0, 0, 'out'), (T * fade, 100, 'linear'), (T * (1 - fade), 100, 'in'), (T, 0)), dt, T)
+        rot = phase(anim((0, 0, 'linear'), (T, 120)), dt, T)
+        inner = group(_mini_flake(x, y0, r), pivot=(x, y0), r=rot,
+                      move=fx.wave(T, [-sway, 0], [sway, 0], 1, shift=dt * 0.7), name='flake_sway')
+        out.append(group(inner, pivot=(x, y0), move=fall, o=op, name='flake_fall'))
+    return out
+
+
+def _tier_edge(cx, ya, yb, hw, side=1):
+    """Cubic (apex -> branch tip) of one side of a fir tier; side=1 right, -1 left."""
+    h = yb - ya
+    return ((cx, ya), (cx + side * hw * 0.2, ya + h * 0.42), (cx + side * hw * 0.62, yb - h * 0.1),
+            (cx + side * hw, yb))
+
+
+def _tier(cx, ya, yb, hw, n=3, droop=16, notch=10):
+    """Fir tier: concave sides and a scalloped lower edge."""
+    r = _tier_edge(cx, ya, yb, hw, 1)
+    lft = _tier_edge(cx, ya, yb, hw, -1)
+    d = 'M %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f ' % (*r[0], *r[1], *r[2], *r[3])
+    xs = [cx + hw - 2 * hw * j / n for j in range(n + 1)]
+    for j in range(n):
+        x0, x1 = xs[j], xs[j + 1]
+        y0 = yb if j == 0 else yb - notch
+        y1 = yb if j == n - 1 else yb - notch
+        w = x0 - x1
+        d += 'C %.2f %.2f %.2f %.2f %.2f %.2f ' % (x0 - w * 0.08, y0 + droop * 1.3, x1 + w * 0.08, y1 + droop * 1.3, x1, y1)
+    d += 'C %.2f %.2f %.2f %.2f %.2f %.2f Z' % (*lft[2], *lft[1], *lft[0])
+    return P(d)
+
+
+def _tier_snow(cx, ya, yb, hw, t, depths, dy=0.0):
+    """Snow lying on the upper part of a tier (follows its sides down to edge parameter t)."""
+    r = [(x, y + dy) for x, y in _cubic_head(*_tier_edge(cx, ya, yb, hw, 1), t)]
+    lft = [(x, y + dy) for x, y in _cubic_head(*_tier_edge(cx, ya, yb, hw, -1), t)]
+    d = 'M %.2f %.2f C %.2f %.2f %.2f %.2f %.2f %.2f ' % (*r[0], *r[1], *r[2], *r[3])
+    x0, y = r[3]
+    x1 = lft[3][0]
+    n = len(depths)
+    for j, dep in enumerate(depths):
+        xa = x0 + (x1 - x0) * j / n
+        xb = x0 + (x1 - x0) * (j + 1) / n
+        d += 'Q %.2f %.2f %.2f %.2f ' % ((xa + xb) / 2, y + dep * 2, xb, y)
+    d += 'C %.2f %.2f %.2f %.2f %.2f %.2f Z' % (*lft[2], *lft[1], *lft[0])
+    return P(d)
+
+
+def _fir(cx, tiers, fill_stops, snow_t=0.42, ow=S.OW, snow=True):
+    """Tiered fir, tiers back -> front: [(ya, yb, hw, scallops, snow depths)]. Returns parts."""
+    out = []
+    for ya, yb, hw, n, depths in tiers:
+        out.append(part(_tier(cx, ya, yb, hw, n), fill=S.vgrad(fill_stops, ya, yb + 16), outline=ow, name='tier'))
+        if snow:
+            out.append(part(_tier_snow(cx, ya, yb, hw, snow_t, depths, dy=7), fill=S.ICE, name='snow_under'))
+            out.append(part(_tier_snow(cx, ya, yb, hw, snow_t, depths),
+                            fill=S.vgrad(S.G_SNOW, ya, ya + (yb - ya) * snow_t + 20), name='snow'))
+    return out
+
+
+# ============================================================= 062 ice crystal
+@emoji(62, 'snowflake_crystal', '💠', 'Кристалл льда', frames=180, still=0)
+def e_crystal(T):
+    cx, cy = 256, 256
+    RT, RI = 210, 100
+    il = (-RI * 0.5, RI * math.sqrt(3) / 2)
+    tip = (0.0, RT)
+    dx, dy = tip[0] - il[0], tip[1] - il[1]
+    ln = math.hypot(dx, dy)
+    du = (dx / ln, dy / ln)
+    nout = (-du[1], du[0])
+    b1 = (il[0] + dx * 0.34, il[1] + dy * 0.34)
+    b2 = (il[0] + dx * 0.53, il[1] + dy * 0.53)
+    bt = (b1[0] + nout[0] * 42 + du[0] * 28, b1[1] + nout[1] * 42 + du[1] * 28)
+    left = [(0.0, 0.0), il, b1, bt, b2, tip]
+    right = [(-x, y) for x, y in reversed(left)]
+    rim = [il, b1, bt, b2, tip] + [(-x, y) for x, y in (b2, bt, b1)]
+
+    def arm(deg):
+        a = math.radians(deg)
+        u, p = (math.cos(a), math.sin(a)), (-math.sin(a), math.cos(a))
+        return lambda pts: [(cx + u[0] * y + p[0] * x, cy + u[1] * y + p[1] * x) for x, y in pts]
+
+    angles = [-90 + 60 * k for k in range(6)]
+    outline_pts = []
+    for d in angles:
+        outline_pts += arm(d)(rim)
+    shape = Bez(outline_pts)
+    lights = [Bez(arm(d)(left)) for d in angles]
+    darks = [Bez(arm(d)(right)) for d in angles]
+    # fills inside the rotating group are solid or radial around the centre (rotation-invariant)
+    g_light = S.rgrad([(0, '#ffffff'), (0.42, '#e3f4ff'), (1, '#93cdff')], cx, cy, RT)
+    g_dark = S.rgrad([(0, '#c9e8ff'), (0.45, '#77b7ff'), (1, '#2f6fe0')], cx, cy, RT)
+    # the arm that passes the top-left light during the loop catches it (arm 5: -150 -> -90 deg)
+    catch = fx.pulse(T, T / 2 - 40, 80, 0, 100, up='sine', down='sine', peak=0.5)
+    hexa = Bez([_pol(cx, cy, 100, d) for d in angles])
+    hub = rounded([_pol(cx, cy, 54, d) for d in angles], 6)
+    ridges = [line(*_pol(cx, cy, 46, d), *_pol(cx, cy, RT - 18, d)) for d in angles]
+    crystal = group(
+        part(shape, fill=S.BLUE_L, outline=S.OW, name='silhouette'),
+        part(*lights, fill=g_light, name='facets_light'),
+        part(*darks, fill=g_dark, name='facets_dark'),
+        part(lights[5], fill=S.WHITE, o=catch, name='catch_light'),
+        part(darks[5], fill=S.ICE_L, o=catch, name='catch_dark'),
+        part(hexa, stroke=stroke(S.WHITE, 5, o=55), name='etch'),
+        part(*ridges, stroke=stroke(S.WHITE, 6, o=85), name='ridges'),
+        fx.shine([shape], T, t0=96, dur=56, angle=30, width=0.26, alpha=0.75),
+        part(hub, fill=S.rgrad([(0, S.WHITE), (0.6, S.ICE_L), (1, S.SKY)], cx, cy, 56), outline=S.OW_THIN, name='hub'),
+        pivot=(cx, cy), r=fx.spin(T, 1 / 6), name='crystal')
+    gem = [part(circle_path(cx, cy, 22), fill=S.vgrad(S.G_DEEP, cy - 22, cy + 22), outline=(S.OUTLINE, 4), name='gem'),
+           part(circle_path(cx - 7, cy - 8, 6.5), fill=S.WHITE, o=90, name='gem_glint')]
+    # glints sit where a tip will be when they peak (outside the rotating group)
+    sparks = []
+    for k, t0 in enumerate((20, 80, 140)):
+        tp = t0 + 16
+        sparks.append(fx.sparkle(*_pol(cx, cy, RT + 4, angles[(2 * k + 1) % 6] + 60 * tp / T), 26, T, t0=t0, dur=40))
+    body = group(crystal, gem, sparks, pivot=(cx, cy), move=fx.bob(T, 12), s=fx.breathe(T, 98, 102, cycles=2))
+    return [fx.glow(cx, cy, 236, alpha=0.36, s=fx.breathe(T, 90, 102, cycles=2)), body]
+
+
+# ============================================================= 063 snowman
+@emoji(63, 'snowman', '⛄', 'Снеговик', frames=180, still=0)
+def e_snowman(T):
+    hx, hy, hr = 256, 212, 88
+    bx, by, br = 256, 372, 108
+    stick = '#6f5446'
+
+    def arm(pts, twigs):
+        lines = [polyline(pts)] + [line(*a, *b) for a, b in twigs]
+        return [part(*lines, stroke=stroke(S.OUTLINE, 26), name='arm_ow'),
+                part(*lines, stroke=stroke(stick, 13), name='arm')]
+
+    arm_l = arm([(170, 336), (118, 300), (66, 270)], [((112, 296), (102, 264)), ((66, 270), (40, 264)), ((66, 270), (58, 244))])
+    wave = anim((0, 0, 'io'), (16, -22, 'sine'), (28, -6, 'sine'), (40, -24, 'sine'), (52, -6, 'sine'),
+                (64, -24, 'sine'), (82, 0, 'io'), (T, 0))
+    arm_r = group(arm([(342, 336), (394, 298), (444, 264)], [((400, 294), (410, 262)), ((444, 264), (470, 260)), ((444, 264), (452, 238))]),
+                  pivot=(342, 336), r=wave, name='arm_wave')
+    body = [part(circle_path(bx, by, br), fill=_snow_fill(bx, by, br), outline=S.OW, name='body'),
+            part(*[circle_path(256, y, 9) for y in (368, 408, 446)], fill=COAL, name='buttons'),
+            part(*[circle_path(253, y - 3, 3) for y in (368, 408, 446)], fill=S.WHITE, o=70, name='button_glint')]
+    # scarf: band around the neck + a tail hanging over the body
+    band = P('M 168 284 C 210 304 302 304 344 284 C 356 292 356 318 344 326 C 302 346 210 346 168 326 '
+             'C 156 318 156 292 168 284 Z')
+    ribs = [line(x, 284 + 15 * (1 - ((x - 256) / 88) ** 2) + 4, x, 326 + 15 * (1 - ((x - 256) / 88) ** 2) - 4)
+            for x in range(182, 340, 16)]
+    tail_shape = P('M 294 312 L 338 306 C 344 340 352 374 360 408 L 316 418 C 310 384 302 346 294 312 Z')
+    fringe = [line(316 + 44 * f, 418 - 10 * f, 316 + 44 * f + 4, 438 - 10 * f) for f in (0.12, 0.38, 0.62, 0.88)]
+    tail = group(
+        part(*fringe, stroke=stroke(S.OUTLINE, 20), name='fringe_ow'),
+        part(*fringe, stroke=stroke('#2c4fa8', 8), name='fringe'),
+        part(tail_shape, fill=S.vgrad(G_KNIT, 306, 418), outline=S.OW_THIN + 1, name='tail'),
+        part(line(300, 336, 342, 330), line(304, 356, 346, 350), stroke=stroke('#6d93ea', 4, o=70), name='tail_ribs'),
+        part(line(308, 380, 352, 372), line(311, 398, 355, 390), stroke=stroke(S.ICE_L, 9), name='tail_stripes'),
+        pivot=(316, 312), r=fx.swing(T, 3, cycles=2), name='scarf_tail')
+    scarf = [part(band, fill=S.vgrad(G_KNIT, 284, 342), outline=S.OW, name='band'),
+             part(*ribs, stroke=stroke('#6d93ea', 4, o=60), name='band_ribs'),
+             part(P('M 182 292 C 214 306 250 308 286 306'), stroke=stroke(S.WHITE, 5, o=35), name='band_gloss')]
+    # head: face + beanie
+    eye = lambda x: group(part(circle_path(x, 214, 11, 14), fill=COAL, name='eye'),
+                          part(circle_path(x - 4, 208, 4), fill=S.WHITE, o=95, name='eye_glint'),
+                          pivot=(x, 214), s=fx.blink(T, 132), name='eye')
+    mouth = [circle_path(x, 264 + 7 * (1 - ((x - 256) / 30) ** 2), 5) for x in (226, 241, 256, 271, 286)]
+    nose = P('M 252 228 C 272 230 302 240 324 252 C 304 258 274 256 254 248 C 248 242 248 234 252 228 Z')
+    dome = P('M 180 172 C 178 116 214 80 256 80 C 298 80 334 116 332 172 Z')
+    pom = group(part(circle_path(256, 72, 27), fill=_snow_fill(256, 72, 27), outline=S.OW, name='pompom'),
+                pivot=(256, 96), r=fx.wobble(T, 76, 44, 12, n=3), name='pompom')
+    head = group(
+        part(circle_path(hx, hy, hr), fill=_snow_fill(hx, hy, hr), outline=S.OW, name='head'),
+        part(circle_path(204, 244, 14, 8), circle_path(308, 246, 14, 8), fill=S.PINK, o=45, name='cheeks'),
+        eye(226), eye(288),
+        part(*mouth, fill=COAL, name='mouth'),
+        part(nose, fill=S.vgrad(G_CARROT, 228, 256), outline=(S.OUTLINE, 4), name='carrot'),
+        part(line(272, 236, 270, 248), line(292, 242, 290, 252), stroke=stroke('#c45a1c', 3, o=70), name='carrot_lines'),
+        pom,
+        part(dome, fill=S.vgrad(G_KNIT, 80, 172), outline=S.OW, name='beanie'),
+        part(*[P('M %d 166 C %d 140 %d 110 %d 92' % (x, x, 256 + (x - 256) * 0.55, 256 + (x - 256) * 0.3))
+               for x in (206, 231, 256, 281, 306)], stroke=stroke('#6d93ea', 5, o=55), name='beanie_ribs'),
+        part(P('M 200 140 C 202 116 220 98 240 92'), stroke=stroke(S.WHITE, 6, o=45), name='beanie_gloss'),
+        part(rounded([(168, 148), (344, 148), (344, 190), (168, 190)], 18), fill=S.vgrad(S.G_SNOW, 148, 190),
+             outline=S.OW, name='cuff'),
+        part(*[line(x, 156, x, 182) for x in range(186, 334, 16)], stroke=stroke('#a9cdf2', 5), name='cuff_ribs'),
+        pivot=(256, 300), r=anim((0, 0, 'io'), (20, 4, 'io'), (64, 4, 'io'), (86, 0, 'io'), (T, 0)), name='head')
+    flakes = _flakes(T, [(74, 60, 200, 13, 0.0, 10), (132, 40, 160, 10, 0.45, 8), (414, 50, 170, 11, 0.25, 9),
+                         (462, 110, 240, 13, 0.7, 10)])
+    snowman = group(arm_l, arm_r, body, tail, head, scarf, pivot=(256, 482),
+                    s=fx.wave(T, [100, 100], [101.5, 98.8], cycles=2), name='snowman')
+    sparks = fx.sparkles([(312, 52, 22), (46, 226, 20), (420, 430, 22)], T, start=30, gap=50, dur=40)
+    return [fx.glow(256, 286, 228, alpha=0.3), flakes, snowman, sparks]
+
+
+# ============================================================= 064 christmas tree
+@emoji(64, 'xmas_tree', '🎄', 'Ёлка', frames=120, still=10)
+def e_xmas_tree(T):
+    cx = 256
+    tiers = [(228, 412, 188, 4, [10, 18, 9, 16, 10]), (152, 316, 142, 3, [9, 16, 8, 14]),
+             (100, 214, 94, 3, [8, 14, 9])]
+    edge = lambda k, side, t: _cubic(*_tier_edge(cx, tiers[k][0], tiers[k][1], tiers[k][2], side), t)
+    # garland zig-zags down the tree: (tier, start side, t start, t end, bulbs)
+    runs = [(2, -1, 0.62, 0.82, 3), (1, 1, 0.55, 0.86, 4), (0, -1, 0.5, 0.88, 5)]
+    colors = [S.ICE_L, S.TEAL, S.VIOLET, S.PINK, S.SKY]
+    garlands, bulbs = [], []
+    for k, side, ta, tb, n in runs:
+        p0 = edge(k, side, ta)
+        p3 = edge(k, -side, tb)
+        sag = 26
+        p1 = (p0[0] + (p3[0] - p0[0]) / 3, p0[1] + (p3[1] - p0[1]) / 3 + sag)
+        p2 = (p0[0] + 2 * (p3[0] - p0[0]) / 3, p0[1] + 2 * (p3[1] - p0[1]) / 3 + sag)
+        garlands.append(Bez([p0, p3], i=[(0, 0), (p2[0] - p3[0], p2[1] - p3[1])],
+                            o=[(p1[0] - p0[0], p1[1] - p0[1]), (0, 0)], closed=False))
+        for j in range(n):
+            bulbs.append(_cubic(p0, p1, p2, p3, (j + 0.5) / n))
+    nb = len(bulbs)
+    lights = []
+    for j, (x, y) in enumerate(bulbs):
+        c = colors[j % len(colors)]
+        t0 = j * T / nb
+        lit = fx.pulse(T, t0, 34, 0, 100, up='out', down='in', peak=0.3)
+        lights.append(group(
+            fx.glow(x, y, 30, color=c, alpha=0.75, o=lit),
+            part(circle_path(x, y, 12), fill=c, outline=(S.OUTLINE, 3.5), name='bulb'),
+            part(circle_path(x, y, 12), fill=S.WHITE, o=lit, name='bulb_lit'),
+            part(circle_path(x - 4, y - 4, 4), fill=S.WHITE, o=85, name='bulb_glint'),
+            name='light'))
+    tree = [part(rounded([(228, 396), (284, 396), (284, 460), (228, 460)], 10),
+                 fill=S.vgrad([(0, '#3a4f8a'), (1, '#1d2b55')], 396, 460), outline=S.OW, name='trunk'),
+            part(P('M 146 474 C 156 446 206 436 256 436 C 306 436 356 446 366 474 C 330 488 182 488 146 474 Z'),
+                 fill=S.vgrad(S.G_SNOW, 436, 486), outline=S.OW, name='mound'),
+            _fir(cx, tiers, G_FIR, snow_t=0.36),
+            part(*garlands, stroke=stroke(S.SNOW, 5, o=80), name='garland'),
+            lights]
+    st = star(256, 92, 5, 54, 25, round_out=7, round_in=5)
+    star_g = group(
+        fx.glow(256, 94, 88, color=S.ICE_L, alpha=0.5, s=fx.breathe(T, 85, 110, cycles=2)),
+        part(st, fill=S.vgrad(S.G_SILVER, 40, 140), outline=S.OW, name='star'),
+        part(circle_path(240, 84, 10, 6).rotate(-35, 240, 84), fill=S.WHITE, o=85, name='star_gloss'),
+        fx.sparkle(290, 56, 22, T, t0=40, dur=40),
+        pivot=(256, 96), r=fx.swing(T, 5), s=fx.breathe(T, 97, 105, cycles=2), name='star')
+    sparks = fx.sparkles([(84, 300, 22), (436, 220, 20), (420, 404, 18)], T, start=10, gap=40, dur=38)
+    return [fx.glow(256, 280, 236, alpha=0.3), group(tree, pivot=(256, 470), s=fx.breathe(T, 99, 101)),
+            star_g, sparks]
+
+
+# ============================================================= 065 snowy fir
+@emoji(65, 'fir_tree', '🌲', 'Заснеженная ель', frames=180, still=0)
+def e_fir_tree(T):
+    cx = 256
+    tiers = [(250, 404, 196, 4, [12, 22, 10, 20, 12]), (180, 318, 156, 4, [10, 20, 9, 18]),
+             (118, 238, 114, 3, [10, 18, 9, 16]), (62, 168, 74, 3, [9, 16, 10])]
+    tip = (cx + 156 - 16, 318 - 14)          # right tip of tier 2, where the clump sits
+    t_drop, t_land = 90, 116
+    clump = lambda x, y: P('M %f %f C %f %f %f %f %f %f C %f %f %f %f %f %f C %f %f %f %f %f %f Z' % (
+        x - 30, y + 8, x - 32, y - 10, x - 14, y - 22, x + 2, y - 18, x + 18, y - 24, x + 34, y - 10, x + 30, y + 8,
+        x + 16, y + 14, x - 16, y + 14, x - 30, y + 8))
+    attached = part(clump(*tip), fill=S.vgrad(S.G_SNOW, tip[1] - 24, tip[1] + 10), outline=S.OW_THIN, name='clump',
+                    pivot=(tip[0], tip[1] + 8),
+                    o=anim((0, 100, 'hold'), (t_drop, 0, 'hold'), (130, 0, 'out'), (150, 100, 'hold'), (T, 100)),
+                    s=anim((0, 100, 'hold'), (t_drop, 100, 'hold'), (130, 30, 'outback'), (156, 100, 'hold'), (T, 100)))
+    tree = group(
+        part(rounded([(234, 390), (278, 390), (278, 452), (234, 452)], 8),
+             fill=S.vgrad([(0, '#3a4f8a'), (1, '#1d2b55')], 390, 452), outline=S.OW, name='trunk'),
+        _fir(cx, tiers, G_FIR_NIGHT, snow_t=0.5),
+        attached,
+        pivot=(256, 448), r=fx.wobble(T, t_drop, 50, 2.2, n=3), name='tree_spring')
+    tree = group(tree, pivot=(256, 448), r=fx.swing(T, 2), name='tree_sway')
+    land = (tip[0] + 12, 446)
+    fall_mv = anim((0, [0, 0], 'hold'), (t_drop, [0, 0], 'in'), (t_land, [land[0] - tip[0], land[1] - tip[1]], 'hold'),
+                   (T, [0, 0]))
+    falling = group(
+        part(clump(*tip), fill=S.vgrad(S.G_SNOW, tip[1] - 24, tip[1] + 10), outline=S.OW_THIN, name='clump_fall',
+             pivot=(tip[0], tip[1] + 8),
+             r=anim((0, 0, 'hold'), (t_drop, 0, 'in'), (t_land, 35, 'hold'), (T, 0)),
+             s=anim((0, [100, 100], 'hold'), (t_land, [100, 100], 'out'), (t_land + 12, [150, 40], 'hold'),
+                    (T, [100, 100]))),
+        pivot=tip, move=fall_mv,
+        o=anim((0, 0, 'hold'), (t_drop, 100, 'hold'), (t_land + 4, 100, 'in'), (t_land + 14, 0, 'hold'), (T, 0)),
+        name='falling')
+    bits = fx.burst(land[0], land[1] - 6, T, t_land, 6, 6, 46, size=12, color=S.SNOW, dur=26, rot=-90, seed=5)
+    bits = [group(b, pivot=land, s=[100, 60]) for b in bits]
+    mound = part(P('M 60 482 C 76 440 170 422 256 422 C 342 422 436 440 452 482 C 380 496 132 496 60 482 Z'),
+                 fill=S.vgrad(S.G_SNOW, 422, 494), outline=S.OW, name='mound')
+    flakes = _flakes(T, [(70, 70, 330, 11, 0.1, 10), (446, 60, 300, 12, 0.55, 10), (110, 40, 200, 9, 0.8, 8),
+                         (412, 90, 220, 9, 0.3, 8)])
+    sparks = fx.sparkles([(190, 252, 18), (330, 182, 16), (150, 448, 20)], T, start=20, gap=56, dur=40)
+    return [fx.glow(256, 270, 232, alpha=0.28), flakes, tree, mound, falling, bits, sparks]
