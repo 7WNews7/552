@@ -70,6 +70,11 @@ def main():
             for n in nums:
                 e = reg[n]
                 w.writerow([n, e.slug, e.uni, e.title, round(e.frames / 60, 2)])
+        with open(os.path.join(args.out, 'emoji_list.md'), 'w', encoding='utf-8') as f:
+            f.write('| № | Файл | Эмодзи для @Stickers | Что это | Петля |\n|---|---|---|---|---|\n')
+            for n in nums:
+                e = reg[n]
+                f.write('| %d | `%s` | %s | %s | %.0f с |\n' % (n, e.slug, e.uni, e.title, e.frames / 60))
     print('built %d emoji, largest %.1f KB' % (len(nums), worst / 1024))
     return 0
 
