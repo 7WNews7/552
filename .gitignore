@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .hoplite/attachments/
 dist/preview/_frames/
+dist/KRONOS_STAFF_emoji.zip

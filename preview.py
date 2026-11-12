@@ -23,9 +23,14 @@ TG_DARK = (24, 34, 45, 255)
 BG_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'background.jpg')
 
 
-def label_font(size):
+def label_font(size, weight=600):
     try:
-        return ImageFont.truetype(FONT_PATH, size)
+        f = ImageFont.truetype(FONT_PATH, size)
+        try:
+            f.set_variation_by_axes([weight])  # variable font defaults to its thinnest weight
+        except (OSError, AttributeError):
+            pass
+        return f
     except OSError:
         return ImageFont.load_default()
 
@@ -75,7 +80,7 @@ def contact_sheet(reg, nums, out, cols=10, cell=150):
     W, H = cols * cell + 40, rows * (cell + 26) + pad + 20
     sheet = _background(W, H)
     d = ImageDraw.Draw(sheet)
-    d.text((W // 2, 38), 'KRONOS STAFF  ·  %d emoji' % len(nums), font=label_font(30), fill=(235, 245, 255, 255), anchor='mm')
+    d.text((W // 2, 38), 'KRONOS STAFF  ·  %d emoji' % len(nums), font=label_font(30, 700), fill=(235, 245, 255, 255), anchor='mm')
     f = label_font(13)
     for k, n in enumerate(nums):
         e = reg[n]
